@@ -240,3 +240,274 @@ For this project, you will need to submit:
 ## Authors ##
 
 Thanks to Fotokite for the initial development of the project code and simulator.
+
+# Implement Estimator #
+
+## Determine the standard deviation of the measurement noise of both GPS X data and Accelerometer X data.  ##
+Parameters in 06_SensorNoise were manually adjusted until the calculated std dev capture 68% of sensor movements.
+
+## Implement a better rate gyro attitude integration scheme in the UpdateFromIMU() function. ##
+
+The function was implemeted as follows:
+```
+void QuadEstimatorEKF::UpdateFromIMU(V3F accel, V3F gyro)
+{
+  // Improve a complementary filter-type attitude filter
+  //
+  // Currently a small-angle approximation integration method is implemented
+  // The integrated (predicted) value is then updated in a complementary filter style with attitude information from accelerometers
+  //
+  // Implement a better integration method that uses the current attitude estimate (rollEst, pitchEst and ekfState(6))
+  // to integrate the body rates into new Euler angles.
+  //
+  // HINTS:
+  //  - there are several ways to go about this, including:
+  //    1) create a rotation matrix based on your current Euler angles, integrate that, convert back to Euler angles
+  //    OR
+  //    2) use the Quaternion<float> class, which has a handy FromEuler123_RPY function for creating a quaternion from Euler Roll/PitchYaw
+  //       (Quaternion<float> also has a IntegrateBodyRate function, though this uses quaternions, not Euler angles)
+
+  ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
+  // SMALL ANGLE GYRO INTEGRATION:
+  // (replace the code below)
+  // make sure you comment it out when you add your own code -- otherwise e.g. you might integrate yaw twice
+  V3F angleDot;
+  float phiEst = rollEst;
+  float thetaEst = pitchEst;
+  Mat3x3F rotMat = Mat3x3F::Zeros();
+  rotMat(0,0) = 1;
+  rotMat(0,1) = sin(phiEst)*tan(thetaEst);
+  rotMat(0,2) = cos(phiEst)*tan(thetaEst);
+  rotMat(1,1) = cos(phiEst);
+  rotMat(1,2) = -sin(phiEst);
+  rotMat(2,1) = sin(phiEst)/cos(thetaEst);
+  rotMat(2,2) = cos(phiEst)/cos(thetaEst);
+
+  angleDot = rotMat * gyro;
+
+  //float predictedPitch = pitchEst + dtIMU * gyro.y;
+  float predictedPitch = pitchEst + dtIMU * angleDot.y;
+  //float predictedRoll = rollEst + dtIMU * gyro.x;
+  float predictedRoll = rollEst + dtIMU * angleDot.x;
+  //ekfState(6) = ekfState(6) + dtIMU * gyro.z;	// yaw
+  ekfState(6) = ekfState(6) + dtIMU * angleDot.z;
+
+  // normalize yaw to -pi .. pi
+  if (ekfState(6) > F_PI) ekfState(6) -= 2.f*F_PI;
+  if (ekfState(6) < -F_PI) ekfState(6) += 2.f*F_PI;
+  /////////////////////////////// END STUDENT CODE ////////////////////////////
+
+  // CALCULATE UPDATE
+  accelRoll = atan2f(accel.y, accel.z);
+  accelPitch = atan2f(-accel.x, 9.81f);
+
+  // FUSE INTEGRATION AND UPDATE
+  rollEst = attitudeTau / (attitudeTau + dtIMU) * (predictedRoll)+dtIMU / (attitudeTau + dtIMU) * accelRoll;
+  pitchEst = attitudeTau / (attitudeTau + dtIMU) * (predictedPitch)+dtIMU / (attitudeTau + dtIMU) * accelPitch;
+
+  lastGyro = gyro;
+}
+```
+
+## Implement all of the elements of the prediction step for the estimator. ##
+The functions were implemeted as follows:
+
+```
+
+VectorXf QuadEstimatorEKF::PredictState(VectorXf curState, float dt, V3F accel, V3F gyro)
+{
+  assert(curState.size() == QUAD_EKF_NUM_STATES);
+  VectorXf predictedState = curState;
+  // Predict the current state forward by time dt using current accelerations and body rates as input
+  // INPUTS:
+  //   curState: starting state
+  //   dt: time step to predict forward by [s]
+  //   accel: acceleration of the vehicle, in body frame, *not including gravity* [m/s2]
+  //   gyro: body rates of the vehicle, in body frame [rad/s]
+  //
+  // OUTPUT:
+  //   return the predicted state as a vector
+
+  // HINTS
+  // - dt is the time duration for which you should predict. It will be very short (on the order of 1ms)
+  //   so simplistic integration methods are fine here
+  // - we've created an Attitude Quaternion for you from the current state. Use
+  //   attitude.Rotate_BtoI(<V3F>) to rotate a vector from body frame to inertial frame
+  // - the yaw integral is already done in the IMU update. Be sure not to integrate it again here
+
+  Quaternion<float> attitude = Quaternion<float>::FromEuler123_RPY(rollEst, pitchEst, curState(6));
+
+  ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
+  V3F accelInWorldFrame = attitude.Rotate_BtoI(accel);
+
+  predictedState(0) += dt*curState(3);
+  predictedState(1) += dt*curState(4);
+  predictedState(2) += dt*curState(5);
+  predictedState(3) += dt*accelInWorldFrame.x;
+  predictedState(4) += dt*accelInWorldFrame.y;
+  predictedState(5) += dt*accelInWorldFrame.z - dt*CONST_GRAVITY;
+  /////////////////////////////// END STUDENT CODE ////////////////////////////
+
+  return predictedState;
+}
+
+MatrixXf QuadEstimatorEKF::GetRbgPrime(float roll, float pitch, float yaw)
+{
+  // first, figure out the Rbg_prime
+  MatrixXf RbgPrime(3, 3);
+  RbgPrime.setZero();
+
+  // Return the partial derivative of the Rbg rotation matrix with respect to yaw. We call this RbgPrime.
+  // INPUTS:
+  //   roll, pitch, yaw: Euler angles at which to calculate RbgPrime
+  //
+  // OUTPUT:
+  //   return the 3x3 matrix representing the partial derivative at the given point
+
+  // HINTS
+  // - this is just a matter of putting the right sin() and cos() functions in the right place.
+  //   make sure you write clear code and triple-check your math
+  // - You can also do some numerical partial derivatives in a unit test scheme to check
+  //   that your calculations are reasonable
+
+  ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
+  float theta = pitch;
+  float phi = roll;
+  float psi = yaw;
+
+  RbgPrime(0,0) = -cos(theta)*sin(psi);
+  RbgPrime(0,1) = -sin(phi)*sin(theta)*sin(psi) - cos(theta)*cos(psi);
+  RbgPrime(0,2) = -cos(phi)*sin(theta)*sin(psi) + sin(phi)*cos(psi);
+  RbgPrime(1,0) = cos(theta)*cos(psi);
+  RbgPrime(1,1) = sin(phi)*sin(theta)*cos(psi)- cos(phi)*sin(psi);
+  RbgPrime(1,2) = cos(phi)*sin(theta)*cos(psi) + sin(phi)*sin(psi);
+  /////////////////////////////// END STUDENT CODE ////////////////////////////
+
+  return RbgPrime;
+}
+
+void QuadEstimatorEKF::Predict(float dt, V3F accel, V3F gyro)
+{
+  // predict the state forward
+  VectorXf newState = PredictState(ekfState, dt, accel, gyro);
+
+  // Predict the current covariance forward by dt using the current accelerations and body rates as input.
+  // INPUTS:
+  //   dt: time step to predict forward by [s]
+  //   accel: acceleration of the vehicle, in body frame, *not including gravity* [m/s2]
+  //   gyro: body rates of the vehicle, in body frame [rad/s]
+  //   state (member variable): current state (state at the beginning of this prediction)
+  //
+  // OUTPUT:
+  //   update the member variable cov to the predicted covariance
+
+  // HINTS
+  // - update the covariance matrix cov according to the EKF equation.
+  //
+  // - you may find the current estimated attitude in variables rollEst, pitchEst, state(6).
+  //
+  // - use the class MatrixXf for matrices. To create a 3x5 matrix A, use MatrixXf A(3,5).
+  //
+  // - the transition model covariance, Q, is loaded up from a parameter file in member variable Q
+  //
+  // - This is unfortunately a messy step. Try to split this up into clear, manageable steps:
+  //   1) Calculate the necessary helper matrices, building up the transition jacobian
+  //   2) Once all the matrices are there, write the equation to update cov.
+  //
+  // - if you want to transpose a matrix in-place, use A.transposeInPlace(), not A = A.transpose()
+  //
+
+  // we'll want the partial derivative of the Rbg matrix
+  MatrixXf RbgPrime = GetRbgPrime(rollEst, pitchEst, ekfState(6));
+
+  // we've created an empty Jacobian for you, currently simply set to identity
+  MatrixXf gPrime(QUAD_EKF_NUM_STATES, QUAD_EKF_NUM_STATES);
+  gPrime.setIdentity();
+
+  ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
+  gPrime(0,3) = dt;
+  gPrime(1,4) = dt;
+  gPrime(2,5) = dt;
+  gPrime(3, 6) = dt*(RbgPrime(0)*accel).sum();
+  gPrime(4, 6) = dt*(RbgPrime(1)*accel).sum();
+  gPrime(5, 6) = dt*(RbgPrime(2)*accel).sum();
+
+  ekfCov = gPrime*ekfCov*gPrime.transpose() + Q;
+  /////////////////////////////// END STUDENT CODE ////////////////////////////
+
+  ekfState = newState;
+}
+
+```
+
+## Implement the magnetometer update. ##
+The function was implemeted as follows:
+```
+void QuadEstimatorEKF::UpdateFromMag(float magYaw)
+{
+  VectorXf z(1), zFromX(1);
+  z(0) = magYaw;
+
+  MatrixXf hPrime(1, QUAD_EKF_NUM_STATES);
+  hPrime.setZero();
+
+  // MAGNETOMETER UPDATE
+  // Hints:
+  //  - Your current estimated yaw can be found in the state vector: ekfState(6)
+  //  - Make sure to normalize the difference between your measured and estimated yaw
+  //    (you don't want to update your yaw the long way around the circle)
+  //  - The magnetomer measurement covariance is available in member variable R_Mag
+  ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
+  zFromX(0) = ekfState(6);
+  float magDisagreement = magYaw - ekfState(6);
+  if (magDisagreement > F_PI)
+  {
+    zFromX(0) += 2.f*F_PI;
+  } else if (magDisagreement < -F_PI)
+  {
+    zFromX(0) -= 2.f*F_PI;
+  }
+
+  hPrime(0, 6) = 1;
+  /////////////////////////////// END STUDENT CODE ////////////////////////////
+
+  Update(z, hPrime, R_Mag, zFromX);
+}
+```
+
+## Implement the GPS update. ##
+The function was implemeted as follows:
+
+```
+void QuadEstimatorEKF::UpdateFromGPS(V3F pos, V3F vel)
+{
+  VectorXf z(6), zFromX(6);
+  z(0) = pos.x;
+  z(1) = pos.y;
+  z(2) = pos.z;
+  z(3) = vel.x;
+  z(4) = vel.y;
+  z(5) = vel.z;
+
+  MatrixXf hPrime(6, QUAD_EKF_NUM_STATES);
+  hPrime.setZero();
+
+  // GPS UPDATE
+  // Hints:
+  //  - The GPS measurement covariance is available in member variable R_GPS
+  //  - this is a very simple update
+  ////////////////////////////// BEGIN STUDENT CODE ///////////////////////////
+  int maxStateIndex = QUAD_EKF_NUM_STATES - 1;
+  hPrime.topLeftCorner(maxStateIndex, maxStateIndex) = MatrixXf::Identity(maxStateIndex, maxStateIndex);
+  zFromX = hPrime*ekfState;
+  /////////////////////////////// END STUDENT CODE ////////////////////////////
+
+  Update(z, hPrime, R_GPS, zFromX);
+}
+```
+
+## Meet the performance criteria of each step. ##
+All tests from the previous controller project as well as new tests for this project satisfy requirements and meet expectations.
+
+## De-tune your controller to successfully fly the final desired box trajectory with your estimator and realistic sensors.  ##
+The contorller from the previous project was applied here and performance criteria for the final scenario were satisfied.
